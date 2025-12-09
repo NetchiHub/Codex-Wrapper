@@ -122,6 +122,31 @@ See `docs/IMPLEMENTATION_PLAN.ja.md` (Japanese) and `docs/AGENTS.md` for details
 > Streaming responses now forward Codex CLI output verbatim. Adjust your Codex profile/config if you want to suppress banners or warnings.
 > Requests are executed concurrently up to the configured `CODEX_MAX_PARALLEL_REQUESTS` limit (default 2).
 
+### Image inputs
+
+- Both `/v1/chat/completions` and `/v1/responses` accept OpenAI-style content parts that include images (`image_url` / `input_image`).
+- Supported sources: `https://`, `http://`, `file://` URIs, and `data:` URLs (base64). Each image is downloaded to `CODEX_WORKDIR` and passed to `codex --image ...`; temp files are removed after the request.
+- Send multiple images by adding multiple `image_url` parts in the same user message; Codex receives one `--image` flag per image in order.
+- Ensure `CODEX_WORKDIR` is writable because image downloads are stored there temporarily (defaults to `/workspace`).
+- Responses API uses the same shape when `input` is an array of content parts.
+
+Example request (chat/completions):
+
+```json
+{
+  "model": "gpt-5-codex",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Describe this image"},
+        {"type": "image_url", "image_url": {"url": "https://example.com/cat.png"}}
+      ]
+    }
+  ]
+}
+```
+
 ## Docker
 
 The repository ships a Dockerfile that bundles this FastAPI wrapper together with the Codex CLI.

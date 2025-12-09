@@ -95,9 +95,9 @@ async def chat_completions(req: ChatCompletionRequest):
                 pass
         raise HTTPException(status_code=400, detail=str(e))
 
-    try:
-        if req.stream:
-            async def event_gen() -> AsyncIterator[bytes]:
+    if req.stream:
+        async def event_gen() -> AsyncIterator[bytes]:
+            try:
                 async for text in run_codex(prompt, overrides, image_paths, model=model_name):
                     if text:
                         chunk = {
@@ -107,14 +107,30 @@ async def chat_completions(req: ChatCompletionRequest):
                         }
                         yield f"data: {json.dumps(chunk)}\n\n".encode()
                 yield b"data: [DONE]\n\n"
+            except CodexError as e:
+                chunk = {
+                    "error": {
+                        "message": str(e),
+                        "type": "server_error",
+                        "code": None,
+                    }
+                }
+                yield f"data: {json.dumps(chunk)}\n\n".encode()
+            finally:
+                for p in image_paths:
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
 
-            return StreamingResponse(event_gen(), media_type="text/event-stream")
-        else:
-            final = await run_codex_last_message(prompt, overrides, image_paths, model=model_name)
-            resp = ChatCompletionResponse(
-                choices=[ChatChoice(message=ChatMessageResponse(content=final))]
-            )
-            return resp
+        return StreamingResponse(event_gen(), media_type="text/event-stream")
+
+    try:
+        final = await run_codex_last_message(prompt, overrides, image_paths, model=model_name)
+        resp = ChatCompletionResponse(
+            choices=[ChatChoice(message=ChatMessageResponse(content=final))]
+        )
+        return resp
     except CodexError as e:
         status = getattr(e, "status_code", None) or 500
         raise HTTPException(
@@ -186,70 +202,75 @@ async def responses_endpoint(req: ResponsesRequest):
                 pass
         raise HTTPException(status_code=400, detail=str(e))
 
+    if req.stream:
+        async def event_gen() -> AsyncIterator[bytes]:
+            try:
+                created_evt = {
+                    "id": resp_id,
+                    "object": "response",
+                    "created": created,
+                    "model": response_model,
+                    "status": "in_progress",
+                }
+                yield f"event: response.created\ndata: {json.dumps(created_evt)}\n\n".encode()
+
+                buf: list[str] = []
+                async for text in run_codex(prompt, codex_overrides, image_paths, model=model):
+                    if text:
+                        buf.append(text)
+                        delta_evt = {"id": resp_id, "delta": text}
+                        yield f"event: response.output_text.delta\ndata: {json.dumps(delta_evt)}\n\n".encode()
+
+                final_text = "".join(buf)
+                done_evt = {"id": resp_id, "text": final_text}
+                yield f"event: response.output_text.done\ndata: {json.dumps(done_evt)}\n\n".encode()
+
+                final_obj = ResponsesObject(
+                    id=resp_id,
+                    created=created,
+                    model=response_model,
+                    status="completed",
+                    output=[
+                        ResponsesMessage(
+                            id=msg_id,
+                            content=[ResponsesOutputText(text=final_text)],
+                        )
+                    ],
+                ).model_dump()
+                yield f"event: response.completed\ndata: {json.dumps(final_obj)}\n\n".encode()
+            except CodexError as e:
+                err_evt = {"id": resp_id, "error": {"message": str(e)}}
+                yield f"event: response.error\ndata: {json.dumps(err_evt)}\n\n".encode()
+            finally:
+                yield b"data: [DONE]\n\n"
+                for p in image_paths:
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
+
+        headers = {
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        }
+        return StreamingResponse(event_gen(), media_type="text/event-stream", headers=headers)
+
     try:
-        if req.stream:
-            async def event_gen() -> AsyncIterator[bytes]:
-                try:
-                    created_evt = {
-                        "id": resp_id,
-                        "object": "response",
-                        "created": created,
-                        "model": response_model,
-                        "status": "in_progress",
-                    }
-                    yield f"event: response.created\ndata: {json.dumps(created_evt)}\n\n".encode()
-
-                    buf: list[str] = []
-                    async for text in run_codex(prompt, codex_overrides, image_paths, model=model):
-                        if text:
-                            buf.append(text)
-                            delta_evt = {"id": resp_id, "delta": text}
-                            yield f"event: response.output_text.delta\ndata: {json.dumps(delta_evt)}\n\n".encode()
-
-                    final_text = "".join(buf)
-                    done_evt = {"id": resp_id, "text": final_text}
-                    yield f"event: response.output_text.done\ndata: {json.dumps(done_evt)}\n\n".encode()
-
-                    final_obj = ResponsesObject(
-                        id=resp_id,
-                        created=created,
-                        model=response_model,
-                        status="completed",
-                        output=[
-                            ResponsesMessage(
-                                id=msg_id,
-                                content=[ResponsesOutputText(text=final_text)],
-                            )
-                        ],
-                    ).model_dump()
-                    yield f"event: response.completed\ndata: {json.dumps(final_obj)}\n\n".encode()
-                except CodexError as e:
-                    err_evt = {"id": resp_id, "error": {"message": str(e)}}
-                    yield f"event: response.error\ndata: {json.dumps(err_evt)}\n\n".encode()
-                finally:
-                    yield b"data: [DONE]\n\n"
-
-            headers = {
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-                "Connection": "keep-alive",
-            }
-            return StreamingResponse(event_gen(), media_type="text/event-stream", headers=headers)
-        else:
-            final = await run_codex_last_message(prompt, codex_overrides, image_paths, model=model)
-            resp = ResponsesObject(
-                id=resp_id,
-                created=created,
-                model=response_model,
-                status="completed",
-                output=[
-                    ResponsesMessage(
-                        id=msg_id,
-                        content=[ResponsesOutputText(text=final)],
-                    )
-                ],
-            )
-            return resp
+        final = await run_codex_last_message(prompt, codex_overrides, image_paths, model=model)
+        resp = ResponsesObject(
+            id=resp_id,
+            created=created,
+            model=response_model,
+            status="completed",
+            output=[
+                ResponsesMessage(
+                    id=msg_id,
+                    content=[ResponsesOutputText(text=final)],
+                )
+            ],
+        )
+        return resp
     except CodexError as e:
         status = getattr(e, "status_code", None) or 500
         raise HTTPException(

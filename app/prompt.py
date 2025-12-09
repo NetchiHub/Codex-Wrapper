@@ -40,7 +40,7 @@ def _extract_images(content: Any) -> List[str]:
             if isinstance(p, dict):
                 t = p.get("type")
                 if t in ("image_url", "input_image", "image"):
-                    url_obj = p.get("image_url") or p.get("url")
+                    url_obj = p.get("image_url") or p.get("url") or p.get("image")
                     if isinstance(url_obj, dict):
                         url = url_obj.get("url")
                     else:

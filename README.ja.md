@@ -124,6 +124,31 @@ client = OpenAI(base_url="http://localhost:8000/v1", api_key="YOUR_PROXY_API_KEY
 > ストリーミング応答は Codex CLI の出力をそのまま転送します。バナーや警告を抑止したい場合は Codex 側のプロファイル／設定で制御してください。
 > API リクエストは `CODEX_MAX_PARALLEL_REQUESTS`（既定 2）で指定した上限まで並列実行されます。
 
+### 画像入力
+
+- `/v1/chat/completions` と `/v1/responses` は、OpenAI 形式のコンテンツ配列（`image_url` / `input_image` を含む）で画像を受け付けます。
+- `https://` / `http://` / `file://` の URI と `data:` スキーム（Base64）に対応。各画像は一時的に `CODEX_WORKDIR` へ保存され、`codex --image ...` として渡されます（リクエスト終了後に削除）。
+- 複数画像は同じユーザーメッセージ内に `image_url` を複数入れるだけで順番どおりに渡ります。
+- 一時保存先として `CODEX_WORKDIR` に書き込み権限が必要です（既定 `/workspace`）。
+- Responses API でも `input` をコンテンツ配列で渡すと同じ形で画像を処理します。
+
+リクエスト例（chat/completions）:
+
+```json
+{
+  "model": "gpt-5-codex",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "この画像を説明して"},
+        {"type": "image_url", "image_url": {"url": "https://example.com/cat.png"}}
+      ]
+    }
+  ]
+}
+```
+
 ## Docker
 
 本リポジトリには FastAPI ラッパーと Codex CLI をまとめてコンテナ化する Dockerfile が同梱されています。
