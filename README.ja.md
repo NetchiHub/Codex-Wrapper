@@ -216,6 +216,9 @@ Structured output（`response_format` や JSON Schema）には Codex CLI が文�
 - CODEX_TIMEOUT: Codex 実行のサーバー側タイムアウト秒数（既定 120 秒）。
 - CODEX_MAX_PARALLEL_REQUESTS: Codex サブプロセスの同時実行数の上限（既定 2）。スループットを増やしたい場合は値を上げ、従来どおり 1 並列で運用したい場合は 1 を設定してください。
 - CODEX_ENV_FILE: 読み込む `.env` ファイルのパス。サーバー起動前に OS 環境変数として設定する必要があり、`.env` 内からは指定できません（既定 `.env`）。
+- CODEX_RESUME_ENABLED: `true` / `false`（既定 `false`）。`true` で Codex CLI の `exec resume` を使い、前回または指定セッションから再開します。
+- CODEX_RESUME_SESSION_ID: resume 有効時にリクエストで指定がない場合に使うデフォルトのセッションID（任意）。
+- CODEX_RESUME_LOG_PATH: セッションIDのログ出力先（省略時は `CODEX_WORKDIR/codex_sessions.log`。resume有効時のみ）。
 
 認証関連の補足
 - OAuth（ChatGPT）と API キーの両モードとも Codex CLI 側で処理します。サーバープロセスと同じ OS ユーザーで `codex login` を実行してください。
@@ -223,6 +226,12 @@ Structured output（`response_format` や JSON Schema）には Codex CLI が文�
 - `PROXY_API_KEY` はこのラッパーへのアクセス制御用であり、Codex の OAuth とは無関係です。
 - ChatGPT ログイン（OAuth）では `OPENAI_API_KEY` は不要ですが、API キー運用では必須です。
 - `CODEX_LOCAL_ONLY=1` の場合、OpenAI などリモートの `base_url` は拒否されるため API キー運用時は設定に注意してください。
+
+### Resume（リクエスト単位）
+- `resume` が有効なとき、`/v1/chat/completions` は `x_codex.resume`（true/false）と `x_codex.resume_session_id` を受け付けます。
+  - `resume=true` + `resume_session_id` → `codex exec resume <id> ...`
+  - `resume=true` のみ → `codex exec resume --last ...`
+  - 指定なし/`false` → これまでどおりステートレス。
 
 Codex の主な設定
 - model: 現状このアカウントの Codex CLI では `gpt-5` と `gpt-5-codex` が利用可能です（2025-09-17 時点で `GET /v1/models` を確認）。 モデル名の末尾に ` minimal` / ` low` / ` medium` / ` high` を付けると推論モード（reasoning effort）を切り替えられます（例: `gpt-5-codex high`）。

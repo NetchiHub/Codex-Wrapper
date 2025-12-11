@@ -214,6 +214,9 @@ This server reads `.env` and uses the following variables. Example values and co
 - CODEX_TIMEOUT: Server‑side timeout (seconds) for Codex runs (default 120).
 - CODEX_MAX_PARALLEL_REQUESTS: Maximum Codex subprocesses allowed at once (default 2). Increase the value to serve more concurrent API calls or set to `1` to restore the previous serial behaviour.
 - CODEX_ENV_FILE: Path to the `.env` file to load. Must be set as an OS env var before the server starts (do not place this inside `.env`). Defaults to `.env`.
+- CODEX_RESUME_ENABLED: `true`/`false` (default `false`). When `true`, the wrapper invokes `codex exec resume` so Codex CLI can continue the last session (or a specified session ID).
+- CODEX_RESUME_SESSION_ID: Optional default session ID to resume when enabled and no per-request ID is provided.
+- CODEX_RESUME_LOG_PATH: Optional path to log created/used session IDs (default `${CODEX_WORKDIR}/codex_sessions.log` when resume is enabled).
 
 Auth notes
 - Both OAuth (ChatGPT) and API‑key modes are handled by Codex CLI. Run `codex login` as the same OS user as the server process.
@@ -221,6 +224,12 @@ Auth notes
 - `PROXY_API_KEY` controls access to this wrapper; it is unrelated to Codex OAuth.
 - ChatGPT login does not require `OPENAI_API_KEY`; API‑key usage does.
 - With `CODEX_LOCAL_ONLY=1`, remote `base_url`s (like OpenAI) are rejected; be mindful when using API‑key mode.
+
+### Resume (per-request)
+- If resume is enabled, `/v1/chat/completions` accepts `x_codex.resume: true|false` and `x_codex.resume_session_id`.
+  - `resume=true` + `resume_session_id` → `codex exec resume <id> ...`
+  - `resume=true` without `resume_session_id` → `codex exec resume --last ...`
+  - `resume=false` or omit (default) → current stateless behaviour.
 
 Codex highlights
 - model: The Codex CLI currently surfaces `gpt-5` and `gpt-5-codex` for this account (verified 2025-09-17 via `GET /v1/models`). Append ` minimal` / ` low` / ` medium` / ` high` to request a specific reasoning effort (e.g. `gpt-5-codex high`).

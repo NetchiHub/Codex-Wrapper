@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     allow_danger_full_access: bool = Field(default=False, alias="CODEX_ALLOW_DANGER_FULL_ACCESS")
     # Deprecated: ignored, but kept to avoid startup failures when legacy env remains.
     codex_model: Optional[str] = Field(default=None, alias="CODEX_MODEL")
+    # Resume support (off by default). When true, wrapper can resume Codex CLI sessions.
+    resume_enabled: bool = Field(default=False, alias="CODEX_RESUME_ENABLED")
+    # Path to session log (session_id, timestamp, workdir). Defaults to CODEX_WORKDIR/codex_sessions.log
+    resume_log_path: Optional[str] = Field(default=None, alias="CODEX_RESUME_LOG_PATH")
+    # Optional default session id for resume (used only when per-request is not provided)
+    resume_session_id: Optional[str] = Field(default=None, alias="CODEX_RESUME_SESSION_ID")
 
     # Default to loading from ".env". You can override the path by
     # passing `_env_file` when instantiating `Settings` (see bottom).

@@ -15,6 +15,9 @@ class XCodexOptions(BaseModel):
     reasoning_effort: Optional[str] = None
     network_access: Optional[bool] = None
     hide_reasoning: Optional[bool] = None
+    # Resume control (optional per-request override)
+    resume: Optional[bool] = None
+    resume_session_id: Optional[str] = None
 
 
 class ChatCompletionRequest(BaseModel):
@@ -61,6 +64,8 @@ class ResponsesRequest(BaseModel):
     input: Any
     stream: Optional[bool] = False
     reasoning: Optional[ResponsesReasoning] = None
+    resume: Optional[bool] = None
+    resume_session_id: Optional[str] = None
 
 
 class ResponsesOutputText(BaseModel):

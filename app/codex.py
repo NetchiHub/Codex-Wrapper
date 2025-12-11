@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import shutil
+import time
 import threading
 import tempfile
 from contextlib import asynccontextmanager, suppress
@@ -49,6 +50,7 @@ _ASYNCIO_STREAM_LIMIT = 512 * 1024  # 512 KiB to tolerate large tool outputs
 _WORKDIR_LOCK = threading.Lock()
 _WORKDIR_PATH: Optional[Path] = None
 _WORKDIR_NEEDS_SKIP_GIT_CHECK = False
+_SESSION_LOG_LOCK = threading.Lock()
 
 
 class _CodexConcurrencyLimiter:
@@ -267,6 +269,66 @@ def _resolve_codex_executable() -> str:
     return exe
 
 
+def _resolve_session_log_path() -> Optional[Path]:
+    """Return session log path if logging is enabled."""
+
+    base = settings.resume_log_path
+    if not base:
+        base = os.path.join(settings.codex_workdir, "codex_sessions.log")
+    try:
+        path = Path(base).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+    except Exception:
+        logger.warning("Unable to prepare session log path %s", base)
+        return None
+
+
+_SESSION_LOG_PATH = _resolve_session_log_path()
+
+
+def _extract_session_id(raw: str) -> Optional[str]:
+    """Extract session/thread id from Codex CLI output if present."""
+
+    # Plain text: "session id: XXXXX"
+    match = re.search(r"session id:\s*([0-9a-fA-F-]{8,})", raw, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+
+    # JSON lines that include thread_id
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("{") and line.endswith("}"):
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                tid = obj.get("thread_id")
+                if isinstance(tid, str) and tid:
+                    return tid.strip()
+    return None
+
+
+def _log_session_id(session_id: str) -> None:
+    """Append session id info to the session log, if enabled."""
+
+    if not session_id:
+        return
+    if _SESSION_LOG_PATH is None:
+        return
+    try:
+        ts = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        line = f"{ts}\tsession_id={session_id}\tworkdir={settings.codex_workdir}\n"
+        with _SESSION_LOG_LOCK:
+            with _SESSION_LOG_PATH.open("a", encoding="utf-8") as f:
+                f.write(line)
+    except Exception as exc:
+        logger.warning("Failed to write session log: %s", exc)
+
+
 def _ensure_workdir_exists() -> None:
     """Ensure Codex working directory exists and is writable, falling back if needed."""
 
@@ -422,7 +484,7 @@ def _configure_codex_home_environment(resolved: Path, had_errors: bool) -> None:
 
     if previous_env != resolved_str:
         if previous_env and previous_env != resolved_str:
-            logger.warning(
+            logger.info(
                 "Overriding unusable CODEX_HOME '%s' with '%s'.",
                 previous_env,
                 resolved_str,
@@ -531,6 +593,8 @@ def _build_cmd_and_env(
     overrides: Optional[Dict] = None,
     images: Optional[List[str]] = None,
     model: Optional[str] = None,
+    resume: bool = False,
+    resume_session_id: Optional[str] = None,
 ) -> list[str]:
     """Build base `codex exec` command with configs and optional images."""
     cfg = {
@@ -569,8 +633,8 @@ def _build_cmd_and_env(
     # Ensure workdir exists (create if missing)
     _ensure_workdir_exists()
 
-    # Note: Rust CLI does not support `-q`. Use human output or JSON mode selectively.
-    cmd = [exe, "exec", prompt, "--color", "never"]
+    # Build base command: options first, then resume target, then prompt
+    cmd = [exe, "exec", "--color", "never"]
     if _WORKDIR_NEEDS_SKIP_GIT_CHECK:
         cmd.append("--skip-git-repo-check")
     if images:
@@ -614,6 +678,17 @@ def _build_cmd_and_env(
         if override_network is not None or settings.workspace_network_access:
             toml_bool = "true" if allow_network else "false"
             cmd += ["--config", f"sandbox_workspace_write={{ network_access = {toml_bool} }}"]
+
+    # resume target after options/configs, before prompt
+    if resume:
+        cmd.append("resume")
+        if resume_session_id:
+            cmd.append(resume_session_id)
+        else:
+            cmd.append("--last")
+
+    # Append prompt last (after configs/resume)
+    cmd.append(prompt)
 
     return cmd
 
@@ -770,6 +845,57 @@ def _models_from_config() -> List[str]:
     return []
 
 
+# --- Model listing parsing helpers (used in tests) ---
+
+
+def _parse_model_listing(raw: str) -> List[str]:
+    """Parse model listing output (JSON or plaintext) and add '-codex' variants."""
+
+    models: list[str] = []
+
+    # Try JSON first
+    try:
+        data = json.loads(raw)
+        items = data.get("data") if isinstance(data, dict) else None
+        if isinstance(items, list):
+            for item in items:
+                mid = item.get("id") if isinstance(item, dict) else None
+                if not mid:
+                    continue
+                models.append(mid)
+                deployments: list[str] = []
+                if isinstance(item, dict):
+                    if "deployment" in item:
+                        deployments.append(str(item.get("deployment")))
+                    if isinstance(item.get("deployments"), list):
+                        deployments.extend([str(d) for d in item["deployments"]])
+                    if isinstance(item.get("variants"), list):
+                        for v in item["variants"]:
+                            if isinstance(v, dict) and v.get("id"):
+                                vid = str(v["id"])
+                                models.append(f"{mid}-{vid}")
+                                if "codex" in vid:
+                                    models.append(f"{mid}-codex")
+                if any("codex" in d for d in deployments):
+                    models.append(f"{mid}-codex")
+    except Exception:
+        pass
+
+    # Fallback: parse plaintext lines
+    for line in raw.splitlines():
+        parts = line.strip().split()
+        if not parts:
+            continue
+        mid = parts[0]
+        if mid.lower() in ("available", "models:", "models"):
+            continue
+        models.append(mid)
+        if any(p.lower() == "codex" for p in parts[1:]):
+            models.append(f"{mid}-codex")
+
+    return _dedupe_preserving_order(models)
+
+
 def _models_from_config_data(data: Dict[str, Any]) -> List[str]:
     models: List[str] = []
 
@@ -847,9 +973,14 @@ async def run_codex(
     overrides: Optional[Dict] = None,
     images: Optional[List[str]] = None,
     model: Optional[str] = None,
+    *,
+    resume: bool = False,
+    resume_session_id: Optional[str] = None,
 ) -> AsyncIterator[str]:
     """Run codex CLI as async generator yielding stdout lines suitable for SSE."""
-    cmd = _build_cmd_and_env(prompt, overrides, images, model)
+    cmd = _build_cmd_and_env(
+        prompt, overrides, images, model, resume=resume, resume_session_id=resume_session_id
+    )
     codex_env = _build_codex_env()
     output_filter = _CodexOutputFilter()
 
@@ -886,6 +1017,11 @@ async def run_codex(
                 if filtered:
                     yield filtered
             await asyncio.wait_for(proc.wait(), timeout=settings.timeout_seconds)
+            session_id = _extract_session_id("".join(raw_lines))
+            if session_id:
+                _log_session_id(session_id)
+            elif resume_session_id:
+                _log_session_id(resume_session_id)
             if proc.returncode != 0:
                 stderr_text = (await proc.stderr.read()).decode(errors="ignore")
                 stdout_text = "".join(raw_lines)
@@ -906,18 +1042,27 @@ async def run_codex_last_message(
     overrides: Optional[Dict] = None,
     images: Optional[List[str]] = None,
     model: Optional[str] = None,
+    *,
+    resume: bool = False,
+    resume_session_id: Optional[str] = None,
 ) -> str:
     """Run codex and return only the final assistant message using --json and --output-last-message.
 
     This avoids human oriented headers and logs from the CLI.
     """
-    cmd = _build_cmd_and_env(prompt, overrides, images, model)
+    cmd = _build_cmd_and_env(
+        prompt, overrides, images, model, resume=resume, resume_session_id=resume_session_id
+    )
     # Create temp file in workdir to ensure permissions
     _ensure_workdir_exists()
     codex_env = _build_codex_env()
     with tempfile.NamedTemporaryFile(prefix="codex-last-", suffix=".txt", dir=settings.codex_workdir, delete=False) as tf:
         out_path = tf.name
-    cmd = cmd + ["--json", "--output-last-message", out_path]
+    # Insert JSON/output flags before resume/prompt
+    insertion_index = len(cmd)
+    if resume:
+        insertion_index = cmd.index("resume") if "resume" in cmd else insertion_index
+    cmd = cmd[:insertion_index] + ["--json", "--output-last-message", out_path] + cmd[insertion_index:]
     try:
         async with _parallel_limiter.slot():
             proc = await asyncio.create_subprocess_exec(
@@ -936,6 +1081,12 @@ async def run_codex_last_message(
             stderr_text = (stderr_data or b"").decode(errors="ignore")
             message, status = _classify_codex_failure(stdout_text, stderr_text)
             raise CodexError(message, status_code=status)
+        stdout_text = (stdout_data or b"").decode(errors="ignore")
+        session_id = _extract_session_id(stdout_text)
+        if session_id:
+            _log_session_id(session_id)
+        elif resume_session_id:
+            _log_session_id(resume_session_id)
         try:
             with open(out_path, "r", encoding="utf-8", errors="ignore") as f:
                 text = f.read()
@@ -944,7 +1095,13 @@ async def run_codex_last_message(
 
         if not text:
             # Fallback to any stdout text when the file is empty or missing.
-            text = (stdout_data or b"").decode(errors="ignore")
+            try:
+                if Path(out_path).exists() and Path(out_path).stat().st_size > 0:
+                    text = Path(out_path).read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                pass
+            if not text:
+                text = (stdout_data or b"").decode(errors="ignore")
         sanitized = _sanitize_codex_text(text)
         if sanitized:
             return sanitized

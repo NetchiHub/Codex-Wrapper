@@ -70,6 +70,15 @@ async def chat_completions(req: ChatCompletionRequest):
     if alias_effort and "reasoning_effort" not in x_overrides:
         x_overrides["reasoning_effort"] = alias_effort
     overrides = x_overrides or None
+    resume_enabled = settings.resume_enabled
+    resume_session_id = settings.resume_session_id
+    if req.x_codex:
+        if req.x_codex.resume is not None:
+            resume_enabled = req.x_codex.resume
+        if req.x_codex.resume_session_id:
+            resume_session_id = req.x_codex.resume_session_id
+    if not resume_enabled:
+        resume_session_id = None
 
     # Safety gate: only allow danger-full-access when explicitly enabled
     if overrides and overrides.get("sandbox") == "danger-full-access":
@@ -98,7 +107,14 @@ async def chat_completions(req: ChatCompletionRequest):
     if req.stream:
         async def event_gen() -> AsyncIterator[bytes]:
             try:
-                async for text in run_codex(prompt, overrides, image_paths, model=model_name):
+                async for text in run_codex(
+                    prompt,
+                    overrides,
+                    image_paths,
+                    model=model_name,
+                    resume=resume_enabled,
+                    resume_session_id=resume_session_id,
+                ):
                     if text:
                         chunk = {
                             "choices": [
@@ -126,7 +142,14 @@ async def chat_completions(req: ChatCompletionRequest):
         return StreamingResponse(event_gen(), media_type="text/event-stream")
 
     try:
-        final = await run_codex_last_message(prompt, overrides, image_paths, model=model_name)
+        final = await run_codex_last_message(
+            prompt,
+            overrides,
+            image_paths,
+            model=model_name,
+            resume=resume_enabled,
+            resume_session_id=resume_session_id,
+        )
         resp = ChatCompletionResponse(
             choices=[ChatChoice(message=ChatMessageResponse(content=final))]
         )
@@ -174,6 +197,14 @@ async def responses_endpoint(req: ResponsesRequest):
         overrides["reasoning_effort"] = alias_effort
     if req.reasoning and req.reasoning.effort:
         overrides["reasoning_effort"] = req.reasoning.effort
+    resume_enabled = settings.resume_enabled
+    resume_session_id = settings.resume_session_id
+    if req.resume is not None:
+        resume_enabled = req.resume
+    if req.resume_session_id:
+        resume_session_id = req.resume_session_id
+    if not resume_enabled:
+        resume_session_id = None
 
     # Enforce local-only model provider when enabled
     if settings.local_only:
@@ -215,11 +246,18 @@ async def responses_endpoint(req: ResponsesRequest):
                 yield f"event: response.created\ndata: {json.dumps(created_evt)}\n\n".encode()
 
                 buf: list[str] = []
-                async for text in run_codex(prompt, codex_overrides, image_paths, model=model):
+                async for text in run_codex(
+                    prompt,
+                    codex_overrides,
+                    image_paths,
+                    model=model,
+                    resume=resume_enabled,
+                    resume_session_id=resume_session_id,
+                ):
                     if text:
                         buf.append(text)
-                        delta_evt = {"id": resp_id, "delta": text}
-                        yield f"event: response.output_text.delta\ndata: {json.dumps(delta_evt)}\n\n".encode()
+                    delta_evt = {"id": resp_id, "delta": text}
+                    yield f"event: response.output_text.delta\ndata: {json.dumps(delta_evt)}\n\n".encode()
 
                 final_text = "".join(buf)
                 done_evt = {"id": resp_id, "text": final_text}
@@ -257,7 +295,14 @@ async def responses_endpoint(req: ResponsesRequest):
         return StreamingResponse(event_gen(), media_type="text/event-stream", headers=headers)
 
     try:
-        final = await run_codex_last_message(prompt, codex_overrides, image_paths, model=model)
+        final = await run_codex_last_message(
+            prompt,
+            codex_overrides,
+            image_paths,
+            model=model,
+            resume=resume_enabled,
+            resume_session_id=resume_session_id,
+        )
         resp = ResponsesObject(
             id=resp_id,
             created=created,
